@@ -1,6 +1,6 @@
 context:
   version: "0.12.0"
-  build_number: 2
+  build_number: 3
   # see github.com/conda-forge/conda-forge.github.io/issues/1059 for naming discussion
   proc_type: ${{ "cuda" ~ cuda_compiler_version | version_to_buildstring if cuda_compiler_version != "None" else "cpu" }}
   # we don't want to leave random substitution left-overs; use naming of CUDA 12 for CPU variant
@@ -37,6 +37,9 @@ source:
       # nvcc complains if clang is too new, even with v20, which upstream uses
       - patches/0009-allow-newer-clang-with-nvcc.patch
       - patches/0010-avoid-redundant-definitions-of-INFINITY-NAN.patch
+      - if: osx and arm64
+        then:
+          - patches/0011-force-metal-version.patch
   - if: osx and arm64
     then:
       - target_directory: tinygrad/extra/disassemblers/applegpu
@@ -47,21 +50,12 @@ build:
   number: ${{ build_number }}
   string: ${{ proc_type }}_py${{ python | version_to_buildstring }}_h${{ hash }}_${{ build_number }}
   skip:
-    # CUDA builds on GPU agents, non-CUDA builds on CPU agents; skip could be avoided
-    # using https://github.com/conda-forge/conda-forge-pinning-feedstock/pull/6910
-    - cuda_compiler_version == "None" and "gpu" in github_actions_labels
-    - cuda_compiler_version != "None" and "cpu" in github_actions_labels
     - match(python, "<3.11")
 
 outputs:
   - package:
       name: tinygrad
     build:
-      # redundant but: https://github.com/prefix-dev/rattler-build/issues/2110
-      skip:
-        - match(python, "<3.11")
-        - cuda_compiler_version == "None" and "gpu" in github_actions_labels
-        - cuda_compiler_version != "None" and "cpu" in github_actions_labels
       script:
         # do this unconditionally to not leave around random substitution left-overs
         - 'sed -i "s/@CUDA_VERSION@/${{ cuda_pseudo_so }}/" tinygrad/runtime/autogen/__init__.py'
@@ -161,18 +155,16 @@ outputs:
         script:
           # reduce number of steps; we just need to show that it's functional
           # however, accuracy should at least trend in the right direction
+          # we remove $PYTHON because it makes Tensor.device autoselection choke
           - if: unix
             then:
               - export STEPS=25
               - export TARGET_EVAL_ACC_PCT=90
+              - unset PYTHON
             else:
               - set "STEPS=25"
               - set "TARGET_EVAL_ACC_PCT=90"
-          - if: aarch64
-            then:
-              # reduce number of steps in emulation
-              - export STEPS=3
-              - export TARGET_EVAL_ACC_PCT=30
+              - set "PYTHON="
           - if: match(cuda_compiler_version, "!=13.0")
             then:
               - python ./examples/beautiful_mnist.py
@@ -195,14 +187,10 @@ outputs:
       name: tinygrad-tests
     build:
       skip:
-        # opengpu server has sm_70 card that's not supported by CUDA 13 anymore
-        - match(cuda_compiler_version, ">=13.0")
-        # missing onnxruntime
-        - match(python, ">=3.14")
         # redundant but: https://github.com/prefix-dev/rattler-build/issues/2110
         - match(python, "<3.11")
-        - cuda_compiler_version == "None" and "gpu" in github_actions_labels
-        - cuda_compiler_version != "None" and "cpu" in github_actions_labels
+        # onnxruntime not available in this platform/python combo
+        - osx and x86_64 and match(python, ">=3.14")
       # splitting off what conda packages under etc/conda/test-files when using test.files.source
       script:
         - if: unix
@@ -247,7 +235,8 @@ outputs:
             - pybind11
             - pycocotools
             - pillow
-            - safetensors
+            # Makes test/unit/test_disk_tensor.py::TestSafetensors::test_load_supported_types fail
+            - safetensors <0.8.0dev0
             - sentencepiece
             - tabulate
             - tiktoken
@@ -263,6 +252,10 @@ outputs:
           content:
             - 'import pytest'
             - 'import sys'
+            - 'import os'
+            # $PYTHON makes Tensor device autoselection choke
+            - 'os.environ.pop("PYTHON", None)'
+            - 'os.environ.setdefault("ONEDNN_VERBOSE", "all")'
             - 'tests_to_skip = "_not_a_real_test"'
             - if: linux
               then:
@@ -278,6 +271,8 @@ outputs:
                 - 'tests_to_skip += " or test_bitfield_interop or test_packed_struct_interop"'
                 # mismatch in expected number of relocations
                 - 'tests_to_skip += " or test_load_clang_jit_strtab"'
+                # flaky, server seems to hang or run into a race condition of sorts
+                - 'tests_to_skip += " or test_getotherprocess or test_putotherprocess"'
             - if: linux and cuda_compiler_version != "None"
               then:
                 # GC clean-up error
@@ -291,6 +286,15 @@ outputs:
                 # somehow fails to stat (or create?!) a temporary file
                 - 'tests_to_skip += " or test_save_all_dtypes"'
                 - 'tests_to_skip += " or (TestDiskTensorMovement and test_slice)"'
+            - if: linux and aarch64
+              then:
+                # expects array([0]), gets array([255])
+                - 'tests_to_skip += " or test_float_cast_to_unsigned_underflow"'
+            - if: linux and aarch64 and match(python, ">=3.13")
+              then:
+                # These fail with: could not create a primitive descriptor for the ... primitive.
+                # Run workload with environment variable ONEDNN_VERBOSE=all to get additional diagnostic information.
+                - 'tests_to_skip += " or test_gemm_fp16 or test_conv2d_fused_half or test_conv2d_half"'
             - if: osx or (linux and cuda_compiler_version != "None")
               then:
                 # beam-related stuff seems to hang on metal, OOM/crash with CUDA

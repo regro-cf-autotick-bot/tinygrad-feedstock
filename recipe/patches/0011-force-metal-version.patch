@@ -1,0 +1,25 @@
+From 25dace2b95b3afd1edffc5297faab75fa2def22c Mon Sep 17 00:00:00 2001
+From: jaimergp <jaimergp@users.noreply.github.com>
+Date: Wed, 10 Jun 2026 09:45:06 +0200
+Subject: [PATCH 11/11] Force set MTLLanguageVersion3_1 for packaging tests to provide bfloat symbols
+
+---
+ tinygrad/runtime/ops_metal.py | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/tinygrad/runtime/ops_metal.py b/tinygrad/runtime/ops_metal.py
+index 27169410f..6f99ff826 100644
+--- a/tinygrad/runtime/ops_metal.py
++++ b/tinygrad/runtime/ops_metal.py
+@@ -55,6 +55,8 @@ class MetalDevice(Compiled):
+ 
+ def metal_src_to_library(device:MetalDevice, src:str) -> metal.MTLLibrary:
+   options = metal.MTLCompileOptions.new()
++  if getenv("CONDA_BUILD"):
++    options.setLanguageVersion(metal.MTLLanguageVersion3_1)
+   options.setFastMathEnabled(getenv("METAL_FAST_MATH"))
+   library = device.sysdevice.newLibraryWithSource_options_error(to_ns_str(src), options, ctypes.byref(compileError:=metal.NSError().retained()))
+   error_check(compileError, CompileError)
+-- 
+2.53.0
+
